@@ -3,6 +3,8 @@ import base64
 import threading
 import time
 import xml.etree.ElementTree as ET
+from collections import deque
+from datetime import datetime
 from flask import Flask, jsonify, render_template_string
 
 PIPE = "/tmp/shairport-sync-metadata"
@@ -28,6 +30,7 @@ PVOL  = _h("pvol")  # volume
 state   = {"title": None, "artist": None, "album": None,
            "playing": False, "source": None, "volume": None}
 staging = {}
+history = deque(maxlen=25)
 lock    = threading.Lock()
 
 HTML = """<!DOCTYPE html>
@@ -56,11 +59,19 @@ HTML = """<!DOCTYPE html>
                 transition: width .4s; }
     #vol-pct  { width: 2.5em; text-align: right; }
     hr { border: none; border-top: 1px solid #eee; margin: 20px 0; }
-    #sysinfo  { font-size: .8rem; color: #aaa; display: flex; gap: 16px; }
+    #sysinfo  { font-size: .8rem; color: #aaa; display: flex; gap: 16px; margin-bottom: 28px; }
+    #history-section h2 { font-size: .75rem; font-weight: normal; color: #aaa;
+                          letter-spacing: .06em; text-transform: uppercase; margin: 0 0 10px; }
+    .h-row    { display: flex; gap: 12px; align-items: baseline;
+                padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: .85rem; }
+    .h-row:last-child { border-bottom: none; }
+    .h-time   { color: #bbb; font-size: .75rem; white-space: nowrap; flex-shrink: 0; width: 5.5em; }
+    .h-title  { font-weight: 500; }
+    .h-artist { color: #888; }
   </style>
 </head>
 <body>
-  <h1 id="status">Loading…</h1>
+  <h1 id="status">Loading...</h1>
   <p id="track"></p>
   <p id="artist"></p>
   <p id="album"></p>
@@ -76,14 +87,18 @@ HTML = """<!DOCTYPE html>
     <span id="uptime"></span>
     <span id="cputemp"></span>
   </div>
+  <div id="history-section" style="display:none">
+    <h2>Recent plays</h2>
+    <div id="history-list"></div>
+  </div>
   <script>
     function poll() {
-      fetch('/status').then(r => r.json()).then(d => {
+      fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
         document.getElementById('status').textContent  = d.playing ? 'Now playing' : 'Not playing';
         document.getElementById('track').textContent   = d.title  || '';
         document.getElementById('artist').textContent  = d.artist || '';
         document.getElementById('album').textContent   = d.album  || '';
-        document.getElementById('source').textContent  = d.source ? '▶ ' + d.source : '';
+        document.getElementById('source').textContent  = d.source ? '> ' + d.source : '';
 
         var vw = document.getElementById('vol-wrap');
         if (d.volume !== null && d.volume !== undefined) {
@@ -94,9 +109,24 @@ HTML = """<!DOCTYPE html>
           vw.style.display = 'none';
         }
 
-        document.getElementById('uptime').textContent  = d.uptime  ? 'Uptime ' + d.uptime  : '';
-        document.getElementById('cputemp').textContent = d.cputemp ? 'CPU '    + d.cputemp + '°C' : '';
-      }).catch(() => {});
+        document.getElementById('uptime').textContent  = d.uptime  ? 'Uptime ' + d.uptime       : '';
+        document.getElementById('cputemp').textContent = d.cputemp ? 'CPU ' + d.cputemp + 'C'  : '';
+
+        var hs = document.getElementById('history-section');
+        var hl = document.getElementById('history-list');
+        if (d.history && d.history.length) {
+          hs.style.display = 'block';
+          hl.innerHTML = d.history.map(function(e) {
+            return '<div class="h-row">' +
+              '<span class="h-time">'   + e.played_at + '</span>' +
+              '<span class="h-title">'  + (e.title  || '-') + '</span>' +
+              '<span class="h-artist">' + (e.artist ? ' · ' + e.artist : '') + '</span>' +
+            '</div>';
+          }).join('');
+        } else {
+          hs.style.display = 'none';
+        }
+      }).catch(function() {});
     }
     poll();
     setInterval(poll, 2000);
@@ -161,11 +191,23 @@ def handle_item(xml_str):
         if type_ == SSNC and code == MDST:
             staging.clear()
         elif type_ == SSNC and code == MDEN:
-            state["title"]  = staging.get("title")
-            state["artist"] = staging.get("artist")
-            state["album"]  = staging.get("album")
+            title  = staging.get("title")
+            artist = staging.get("artist")
+            album  = staging.get("album")
+            state["title"]   = title
+            state["artist"]  = artist
+            state["album"]   = album
             state["playing"] = True
             staging.clear()
+            # append to history if different from most recent entry
+            if title or artist:
+                last = history[0] if history else None
+                if not last or last["title"] != title or last["artist"] != artist:
+                    history.appendleft({
+                        "title":     title,
+                        "artist":    artist,
+                        "played_at": datetime.now().strftime("%-I:%M %p"),
+                    })
         elif code == MINM:
             staging["title"] = data
         elif code == ASAR:
@@ -222,7 +264,10 @@ def index():
 @app.route("/status")
 def status():
     with lock:
-        return jsonify({**state, "uptime": get_uptime(), "cputemp": get_cputemp()})
+        return jsonify({**state,
+                        "uptime":  get_uptime(),
+                        "cputemp": get_cputemp(),
+                        "history": list(history)})
 
 
 if __name__ == "__main__":

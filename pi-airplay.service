@@ -1,0 +1,13 @@
+[Unit]
+Description=Pi AirPlay status page
+After=network.target shairport-sync.service
+
+[Service]
+User=aal
+WorkingDirectory=/home/aal/pi-airplay
+ExecStart=/usr/bin/python3 /home/aal/pi-airplay/app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import json
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -7,7 +8,8 @@ from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify, render_template_string
 
-PIPE = "/tmp/shairport-sync-metadata"
+PIPE         = "/tmp/shairport-sync-metadata"
+HISTORY_FILE = "/home/aal/pi-airplay/history.json"
 
 def _h(s):
     return s.encode().hex()
@@ -30,7 +32,14 @@ PVOL  = _h("pvol")  # volume
 state   = {"title": None, "artist": None, "album": None,
            "playing": False, "source": None, "volume": None}
 staging = {}
-history = deque(maxlen=25)
+def _load_history():
+    try:
+        with open(HISTORY_FILE) as f:
+            return deque(json.load(f), maxlen=25)
+    except Exception:
+        return deque(maxlen=25)
+
+history = _load_history()
 lock    = threading.Lock()
 
 HTML = """<!DOCTYPE html>
@@ -208,6 +217,11 @@ def handle_item(xml_str):
                         "artist":    artist,
                         "played_at": datetime.now().strftime("%-I:%M %p"),
                     })
+                    try:
+                        with open(HISTORY_FILE, "w") as f:
+                            json.dump(list(history), f)
+                    except Exception:
+                        pass
         elif code == MINM:
             staging["title"] = data
         elif code == ASAR:

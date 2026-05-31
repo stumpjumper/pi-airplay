@@ -48,6 +48,37 @@ def get_current_output():
     return "headphones"
 
 
+def get_mem_pct():
+    try:
+        info = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, v = line.split(":")
+                info[k.strip()] = int(v.strip().split()[0])
+        used = info["MemTotal"] - info["MemAvailable"]
+        return round(used / info["MemTotal"] * 100)
+    except Exception:
+        return None
+
+
+def get_load():
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().split()
+        return f"{parts[0]}  {parts[1]}  {parts[2]}"
+    except Exception:
+        return None
+
+
+def get_shairport_active():
+    try:
+        r = subprocess.run(["systemctl", "is-active", "shairport-sync"],
+                           capture_output=True, text=True, timeout=3)
+        return r.stdout.strip() == "active"
+    except Exception:
+        return None
+
+
 state   = {"title": None, "artist": None, "album": None,
            "playing": False, "source": None, "volume": None,
            "output": get_current_output()}
@@ -90,7 +121,11 @@ HTML = """<!DOCTYPE html>
                 transition: width .4s; }
     #vol-pct  { width: 2.5em; text-align: right; }
     hr { border: none; border-top: 1px solid #eee; margin: 20px 0; }
-    #sysinfo  { font-size: .8rem; color: #aaa; display: flex; gap: 16px; margin-bottom: 16px; }
+    #sysinfo  { font-size: .8rem; color: #aaa; display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
+    .svc-dot  { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+                margin-right: 4px; vertical-align: middle; background: #ccc; }
+    .svc-dot.up   { background: #5cb85c; }
+    .svc-dot.down { background: #d9534f; }
     .out-sel  { display: flex; gap: 8px; margin-bottom: 20px; }
     .out-btn  { font-size: .8rem; padding: 4px 14px; border: 1px solid #ddd;
                 border-radius: 12px; background: none; cursor: pointer; color: #aaa; }
@@ -122,6 +157,9 @@ HTML = """<!DOCTYPE html>
   <div id="sysinfo">
     <span id="uptime"></span>
     <span id="cputemp"></span>
+    <span id="mem"></span>
+    <span id="load"></span>
+    <span id="airplay-svc"><span class="svc-dot" id="airplay-dot"></span>AirPlay</span>
   </div>
   <div class="out-sel">
     <button class="out-btn" id="btn-headphones" onclick="setOutput('headphones')">Headphones</button>
@@ -165,7 +203,14 @@ HTML = """<!DOCTYPE html>
         }
 
         document.getElementById('uptime').textContent  = d.uptime  ? 'Uptime ' + d.uptime      : '';
-        document.getElementById('cputemp').textContent = d.cputemp ? 'CPU ' + d.cputemp + 'C' : '';
+        document.getElementById('cputemp').textContent = d.cputemp ? 'CPU ' + d.cputemp + '\xb0C' : '';
+        document.getElementById('mem').textContent     = d.mem     ? 'Mem ' + d.mem + '%'         : '';
+        document.getElementById('load').textContent    = d.load    ? 'Load ' + d.load             : '';
+
+        var dot = document.getElementById('airplay-dot');
+        if (d.shairport_active !== null && d.shairport_active !== undefined) {
+          dot.className = 'svc-dot ' + (d.shairport_active ? 'up' : 'down');
+        }
 
         if (d.output) markOutput(d.output);
 
@@ -328,9 +373,12 @@ def index():
 def status():
     with lock:
         return jsonify({**state,
-                        "uptime":  get_uptime(),
-                        "cputemp": get_cputemp(),
-                        "history": list(history)})
+                        "uptime":           get_uptime(),
+                        "cputemp":          get_cputemp(),
+                        "mem":              get_mem_pct(),
+                        "load":             get_load(),
+                        "shairport_active": get_shairport_active(),
+                        "history":          list(history)})
 
 
 @app.route("/set_output", methods=["POST"])

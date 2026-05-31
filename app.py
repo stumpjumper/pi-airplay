@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 import base64
 import json
+import subprocess
 import threading
 import time
 import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
-PIPE         = "/tmp/shairport-sync-metadata"
-HISTORY_FILE = "/home/aal/pi-airplay/history.json"
+PIPE           = "/tmp/shairport-sync-metadata"
+HISTORY_FILE   = "/home/aal/pi-airplay/history.json"
+SHAIRPORT_CONF = "/etc/shairport-sync.conf"
+
+OUTPUT_DEVICES = {
+    "headphones": "hw:Headphones",
+    "hdmi":       "hw:vc4hdmi",
+}
 
 def _h(s):
     return s.encode().hex()
@@ -29,9 +36,24 @@ MDEN  = _h("mden")
 SNAM  = _h("snam")  # source device name
 PVOL  = _h("pvol")  # volume
 
+
+def get_current_output():
+    try:
+        with open(SHAIRPORT_CONF) as f:
+            for line in f:
+                if "output_device" in line:
+                    return "hdmi" if "vc4hdmi" in line else "headphones"
+    except Exception:
+        pass
+    return "headphones"
+
+
 state   = {"title": None, "artist": None, "album": None,
-           "playing": False, "source": None, "volume": None}
+           "playing": False, "source": None, "volume": None,
+           "output": get_current_output()}
 staging = {}
+
+
 def _load_history():
     try:
         with open(HISTORY_FILE) as f:
@@ -68,7 +90,11 @@ HTML = """<!DOCTYPE html>
                 transition: width .4s; }
     #vol-pct  { width: 2.5em; text-align: right; }
     hr { border: none; border-top: 1px solid #eee; margin: 20px 0; }
-    #sysinfo  { font-size: .8rem; color: #aaa; display: flex; gap: 16px; margin-bottom: 28px; }
+    #sysinfo  { font-size: .8rem; color: #aaa; display: flex; gap: 16px; margin-bottom: 16px; }
+    .out-sel  { display: flex; gap: 8px; margin-bottom: 20px; }
+    .out-btn  { font-size: .8rem; padding: 4px 14px; border: 1px solid #ddd;
+                border-radius: 12px; background: none; cursor: pointer; color: #aaa; }
+    .out-btn.active { background: #333; color: #fff; border-color: #333; }
     #history-section h2 { font-size: .75rem; font-weight: normal; color: #aaa;
                           letter-spacing: .06em; text-transform: uppercase; margin: 0 0 10px; }
     .h-row    { display: flex; gap: 12px; align-items: baseline;
@@ -77,6 +103,7 @@ HTML = """<!DOCTYPE html>
     .h-time   { color: #bbb; font-size: .75rem; white-space: nowrap; flex-shrink: 0; width: 5.5em; }
     .h-title  { font-weight: 500; }
     .h-artist { color: #888; }
+    .h-album  { color: #bbb; font-size: .78rem; font-style: italic; }
   </style>
 </head>
 <body>
@@ -96,11 +123,30 @@ HTML = """<!DOCTYPE html>
     <span id="uptime"></span>
     <span id="cputemp"></span>
   </div>
+  <div class="out-sel">
+    <button class="out-btn" id="btn-headphones" onclick="setOutput('headphones')">Headphones</button>
+    <button class="out-btn" id="btn-hdmi" onclick="setOutput('hdmi')">HDMI</button>
+  </div>
   <div id="history-section" style="display:none">
     <h2>Recent plays</h2>
     <div id="history-list"></div>
   </div>
   <script>
+    function setOutput(dev) {
+      fetch('/set_output', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({device: dev})
+      }).then(function(r) { return r.json(); })
+        .then(function(d) { if (d.output) markOutput(d.output); })
+        .catch(function() {});
+    }
+    function markOutput(dev) {
+      ['headphones', 'hdmi'].forEach(function(id) {
+        var el = document.getElementById('btn-' + id);
+        el.className = 'out-btn' + (id === dev ? ' active' : '');
+      });
+    }
     function poll() {
       fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
         document.getElementById('status').textContent  = d.playing ? 'Now playing' : 'Not playing';
@@ -118,8 +164,10 @@ HTML = """<!DOCTYPE html>
           vw.style.display = 'none';
         }
 
-        document.getElementById('uptime').textContent  = d.uptime  ? 'Uptime ' + d.uptime       : '';
-        document.getElementById('cputemp').textContent = d.cputemp ? 'CPU ' + d.cputemp + 'C'  : '';
+        document.getElementById('uptime').textContent  = d.uptime  ? 'Uptime ' + d.uptime      : '';
+        document.getElementById('cputemp').textContent = d.cputemp ? 'CPU ' + d.cputemp + 'C' : '';
+
+        if (d.output) markOutput(d.output);
 
         var hs = document.getElementById('history-section');
         var hl = document.getElementById('history-list');
@@ -129,7 +177,8 @@ HTML = """<!DOCTYPE html>
             return '<div class="h-row">' +
               '<span class="h-time">'   + e.played_at + '</span>' +
               '<span class="h-title">'  + (e.title  || '-') + '</span>' +
-              '<span class="h-artist">' + (e.artist ? ' · ' + e.artist : '') + '</span>' +
+              '<span class="h-artist">' + (e.artist ? ' \xb7 ' + e.artist : '') + '</span>' +
+              '<span class="h-album">'  + (e.album  ? ' \xb7 ' + e.album  : '') + '</span>' +
             '</div>';
           }).join('');
         } else {
@@ -208,13 +257,13 @@ def handle_item(xml_str):
             state["album"]   = album
             state["playing"] = True
             staging.clear()
-            # append to history if different from most recent entry
             if title or artist:
                 last = history[0] if history else None
                 if not last or last["title"] != title or last["artist"] != artist:
                     history.appendleft({
                         "title":     title,
                         "artist":    artist,
+                        "album":     album,
                         "played_at": datetime.now().strftime("%-I:%M %p"),
                     })
                     try:
@@ -282,6 +331,22 @@ def status():
                         "uptime":  get_uptime(),
                         "cputemp": get_cputemp(),
                         "history": list(history)})
+
+
+@app.route("/set_output", methods=["POST"])
+def set_output():
+    device = (request.json or {}).get("device")
+    if device not in OUTPUT_DEVICES:
+        return jsonify({"error": "invalid device"}), 400
+    result = subprocess.run(
+        ["sudo", "/usr/local/bin/set-airplay-output", OUTPUT_DEVICES[device]],
+        capture_output=True, timeout=15
+    )
+    if result.returncode != 0:
+        return jsonify({"error": "failed to switch output"}), 500
+    with lock:
+        state["output"] = device
+    return jsonify({"output": device})
 
 
 if __name__ == "__main__":

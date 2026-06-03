@@ -7,16 +7,10 @@ import time
 import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string
 
 PIPE           = "/tmp/shairport-sync-metadata"
 HISTORY_FILE   = "/home/aal/pi-airplay/history.json"
-SHAIRPORT_CONF = "/etc/shairport-sync.conf"
-
-OUTPUT_DEVICES = {
-    "headphones": "hw:Headphones",
-    "hdmi":       "hw:vc4hdmi",
-}
 
 def _h(s):
     return s.encode().hex()
@@ -24,7 +18,7 @@ def _h(s):
 SSNC  = _h("ssnc")
 MINM  = _h("minm")
 ASAR  = _h("asar")
-ASAL  = _h("asal")  # album
+ASAL  = _h("asal")
 PBEG  = _h("pbeg")
 PEND  = _h("pend")
 PAUS  = _h("paus")
@@ -33,19 +27,9 @@ ABEG  = _h("abeg")
 AEND  = _h("aend")
 MDST  = _h("mdst")
 MDEN  = _h("mden")
-SNAM  = _h("snam")  # source device name
-PVOL  = _h("pvol")  # volume
+SNAM  = _h("snam")
+PVOL  = _h("pvol")
 
-
-def get_current_output():
-    try:
-        with open(SHAIRPORT_CONF) as f:
-            for line in f:
-                if "output_device" in line:
-                    return "hdmi" if "vc4hdmi" in line else "headphones"
-    except Exception:
-        pass
-    return "headphones"
 
 
 def get_mem_pct():
@@ -70,192 +54,6 @@ def get_load():
         return None
 
 
-def get_shairport_active():
-    try:
-        r = subprocess.run(["systemctl", "is-active", "shairport-sync"],
-                           capture_output=True, text=True, timeout=3)
-        return r.stdout.strip() == "active"
-    except Exception:
-        return None
-
-
-state   = {"title": None, "artist": None, "album": None,
-           "playing": False, "source": None, "volume": None,
-           "output": get_current_output()}
-staging = {}
-
-
-def _load_history():
-    try:
-        with open(HISTORY_FILE) as f:
-            return deque(json.load(f), maxlen=25)
-    except Exception:
-        return deque(maxlen=25)
-
-history = _load_history()
-lock    = threading.Lock()
-
-HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pi AirPlay</title>
-  <style>
-    * { box-sizing: border-box; }
-    body  { font-family: sans-serif; max-width: 520px; margin: 60px auto;
-            padding: 0 24px; color: #222; }
-    #status { font-size: .85rem; font-weight: normal; color: #888;
-              margin: 0 0 20px; letter-spacing: .04em; text-transform: uppercase; }
-    #track  { font-size: 1.5rem; font-weight: bold; margin: 0 0 4px; min-height: 1.8rem; }
-    #artist { font-size: 1rem; color: #444; margin: 0 0 2px; min-height: 1.2rem; }
-    #album  { font-size: .9rem; color: #888; font-style: italic;
-              margin: 0 0 20px; min-height: 1.1rem; }
-    .meta-row { display: flex; align-items: center; gap: 16px;
-                font-size: .85rem; color: #666; margin-bottom: 6px; }
-    #source { flex: 1; white-space: nowrap; overflow: hidden;
-              text-overflow: ellipsis; min-height: 1rem; }
-    .vol-wrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-    .vol-bar  { width: 80px; height: 4px; background: #ddd; border-radius: 2px; }
-    .vol-fill { height: 100%; background: #888; border-radius: 2px;
-                transition: width .4s; }
-    #vol-pct  { width: 2.5em; text-align: right; }
-    hr { border: none; border-top: 1px solid #eee; margin: 20px 0; }
-    #sysinfo  { font-size: .8rem; color: #aaa; display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
-    .svc-dot  { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-                margin-right: 4px; vertical-align: middle; background: #ccc; }
-    .svc-dot.up   { background: #5cb85c; }
-    .svc-dot.down { background: #d9534f; }
-    .out-sel  { display: flex; gap: 8px; margin-bottom: 20px; }
-    .out-btn  { font-size: .8rem; padding: 4px 14px; border: 1px solid #ddd;
-                border-radius: 12px; background: none; cursor: pointer; color: #aaa; }
-    .out-btn.active { background: #333; color: #fff; border-color: #333; }
-    #history-section h2 { font-size: .75rem; font-weight: normal; color: #aaa;
-                          letter-spacing: .06em; text-transform: uppercase; margin: 0 0 10px; }
-    .h-row    { display: flex; gap: 12px; align-items: baseline;
-                padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: .85rem; }
-    .h-row:last-child { border-bottom: none; }
-    .h-time   { color: #bbb; font-size: .75rem; white-space: nowrap; flex-shrink: 0; width: 5.5em; }
-    .h-title  { font-weight: 500; }
-    .h-artist { color: #888; }
-    .h-album  { color: #bbb; font-size: .78rem; font-style: italic; }
-  </style>
-</head>
-<body>
-  <h1 id="status">Loading...</h1>
-  <p id="track"></p>
-  <p id="artist"></p>
-  <p id="album"></p>
-  <div class="meta-row">
-    <span id="source"></span>
-    <div class="vol-wrap" id="vol-wrap" style="display:none">
-      <div class="vol-bar"><div class="vol-fill" id="vol-fill"></div></div>
-      <span id="vol-pct"></span>
-    </div>
-  </div>
-  <hr>
-  <div id="sysinfo">
-    <span id="uptime"></span>
-    <span id="cputemp"></span>
-    <span id="mem"></span>
-    <span id="load"></span>
-    <span id="airplay-svc"><span class="svc-dot" id="airplay-dot"></span>AirPlay</span>
-  </div>
-  <div class="out-sel">
-    <button class="out-btn" id="btn-headphones" onclick="setOutput('headphones')">Headphones</button>
-    <button class="out-btn" id="btn-hdmi" onclick="setOutput('hdmi')">HDMI</button>
-  </div>
-  <div id="history-section" style="display:none">
-    <h2>Recent plays</h2>
-    <div id="history-list"></div>
-  </div>
-  <script>
-    function setOutput(dev) {
-      fetch('/set_output', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({device: dev})
-      }).then(function(r) { return r.json(); })
-        .then(function(d) { if (d.output) markOutput(d.output); })
-        .catch(function() {});
-    }
-    function markOutput(dev) {
-      ['headphones', 'hdmi'].forEach(function(id) {
-        var el = document.getElementById('btn-' + id);
-        el.className = 'out-btn' + (id === dev ? ' active' : '');
-      });
-    }
-    function poll() {
-      fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
-        document.getElementById('status').textContent  = d.playing ? 'Now playing' : 'Not playing';
-        document.getElementById('track').textContent   = d.title  || '';
-        document.getElementById('artist').textContent  = d.artist || '';
-        document.getElementById('album').textContent   = d.album  || '';
-        document.getElementById('source').textContent  = d.source ? '> ' + d.source : '';
-
-        var vw = document.getElementById('vol-wrap');
-        if (d.volume !== null && d.volume !== undefined) {
-          vw.style.display = 'flex';
-          document.getElementById('vol-fill').style.width = d.volume + '%';
-          document.getElementById('vol-pct').textContent  = d.volume + '%';
-        } else {
-          vw.style.display = 'none';
-        }
-
-        document.getElementById('uptime').textContent  = d.uptime  ? 'Uptime ' + d.uptime      : '';
-        document.getElementById('cputemp').textContent = d.cputemp ? 'CPU ' + d.cputemp + '\xb0C' : '';
-        document.getElementById('mem').textContent     = d.mem     ? 'Mem ' + d.mem + '%'         : '';
-        document.getElementById('load').textContent    = d.load    ? 'Load ' + d.load             : '';
-
-        var dot = document.getElementById('airplay-dot');
-        if (d.shairport_active !== null && d.shairport_active !== undefined) {
-          dot.className = 'svc-dot ' + (d.shairport_active ? 'up' : 'down');
-        }
-
-        if (d.output) markOutput(d.output);
-
-        var hs = document.getElementById('history-section');
-        var hl = document.getElementById('history-list');
-        if (d.history && d.history.length) {
-          hs.style.display = 'block';
-          hl.innerHTML = d.history.map(function(e) {
-            return '<div class="h-row">' +
-              '<span class="h-time">'   + e.played_at + '</span>' +
-              '<span class="h-title">'  + (e.title  || '-') + '</span>' +
-              '<span class="h-artist">' + (e.artist ? ' \xb7 ' + e.artist : '') + '</span>' +
-              '<span class="h-album">'  + (e.album  ? ' \xb7 ' + e.album  : '') + '</span>' +
-            '</div>';
-          }).join('');
-        } else {
-          hs.style.display = 'none';
-        }
-      }).catch(function() {});
-    }
-    poll();
-    setInterval(poll, 2000);
-  </script>
-</body>
-</html>"""
-
-
-def b64decode(text):
-    try:
-        return base64.b64decode(text).decode("utf-8", errors="replace")
-    except Exception:
-        return None
-
-
-def parse_volume(data):
-    # "airplay_vol,current_dBFS,min_dBFS,max_dBFS"  airplay_vol: -30..0, -144=muted
-    try:
-        airplay_vol = float(data.split(",")[0])
-        if airplay_vol <= -30:
-            return 0
-        return round((airplay_vol + 30) / 30 * 100)
-    except Exception:
-        return None
-
-
 def get_uptime():
     try:
         with open("/proc/uptime") as f:
@@ -276,6 +74,346 @@ def get_cputemp():
     try:
         with open("/sys/class/thermal/thermal_zone0/temp") as f:
             return round(int(f.read().strip()) / 1000, 1)
+    except Exception:
+        return None
+
+
+def get_service_info():
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "shairport-sync",
+             "--property=ActiveState,NRestarts,ActiveEnterTimestampMonotonic"],
+            capture_output=True, text=True, timeout=3
+        )
+        props = {}
+        for line in r.stdout.splitlines():
+            k, _, v = line.partition("=")
+            props[k.strip()] = v.strip()
+
+        active   = props.get("ActiveState") == "active"
+        restarts = int(props.get("NRestarts", "0") or "0")
+
+        mono_us = int(props.get("ActiveEnterTimestampMonotonic", "0") or "0")
+        service_age_secs = None
+        if mono_us > 0:
+            with open("/proc/uptime") as f:
+                uptime_secs = float(f.read().split()[0])
+            service_age_secs = uptime_secs - mono_us / 1e6
+
+        return {"active": active, "restarts": restarts, "service_age_secs": service_age_secs}
+    except Exception:
+        return {"active": False, "restarts": 0, "service_age_secs": None}
+
+
+_log_cache: dict = {"lines": [], "ts": 0.0}
+
+def get_recent_logs():
+    now = time.time()
+    if now - _log_cache["ts"] < 10:
+        return _log_cache["lines"]
+    try:
+        r = subprocess.run(
+            ["journalctl", "-u", "shairport-sync", "-n", "10", "--no-pager", "--output=short"],
+            capture_output=True, text=True, timeout=5
+        )
+        lines = [l for l in r.stdout.splitlines() if l and not l.startswith("--")][-10:]
+        _log_cache.update({"lines": lines, "ts": now})
+        return lines
+    except Exception:
+        return _log_cache["lines"]
+
+
+state   = {"title": None, "artist": None, "album": None,
+           "playing": False, "source": None, "volume": None}
+staging: dict = {}
+
+
+def _load_history():
+    try:
+        with open(HISTORY_FILE) as f:
+            return deque(json.load(f), maxlen=25)
+    except Exception:
+        return deque(maxlen=25)
+
+history = _load_history()
+lock    = threading.Lock()
+
+HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pi AirPlay</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+           max-width: 520px; margin: 32px auto; padding: 0 20px;
+           color: #222; background: #fff; }
+
+    /* ── Health banner ── */
+    .health {
+      padding: 14px 16px; border-radius: 10px; margin-bottom: 24px;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
+    .health.ok   { background: #e8f5e8; }
+    .health.warn { background: #fff8e0; }
+    .health.down { background: #fde8e8; }
+    .health-info { flex: 1; min-width: 0; }
+    .health-title { font-size: 1rem; font-weight: 700; margin-bottom: 3px; }
+    .health.ok   .health-title { color: #1a6e1a; }
+    .health.warn .health-title { color: #7a5000; }
+    .health.down .health-title { color: #8b0000; }
+    .health-action { font-size: .875rem; }
+    .health.ok   .health-action { color: #2e7d2e; }
+    .health.warn .health-action { color: #7a5000; font-weight: 600; }
+    .health.down .health-action { color: #8b0000; font-weight: 700; }
+    .restart-btn {
+      padding: 8px 16px; border: none; border-radius: 8px;
+      cursor: pointer; font-weight: 600; white-space: nowrap; flex-shrink: 0;
+      font-size: .875rem; transition: opacity .15s;
+    }
+    .restart-btn:disabled { opacity: .45; cursor: wait; }
+    .health.ok   .restart-btn { background: #c5e6c5; color: #1a5c1a; }
+    .health.warn .restart-btn { background: #f0c030; color: #5a3a00;
+                                font-size: 1rem; padding: 10px 20px; }
+    .health.down .restart-btn { background: #c0392b; color: #fff;
+                                font-size: 1.05rem; padding: 12px 24px; width: 100%; }
+
+    /* ── Now playing ── */
+    #status-line { font-size: .78rem; font-weight: 700; color: #aaa;
+                   letter-spacing: .08em; text-transform: uppercase; margin-bottom: 10px; }
+    #track  { font-size: 1.5rem; font-weight: bold; margin-bottom: 4px; min-height: 1.8rem; }
+    #artist { font-size: 1rem; color: #444; margin-bottom: 2px; min-height: 1.2rem; }
+    #album  { font-size: .9rem; color: #888; font-style: italic;
+              margin-bottom: 16px; min-height: 1.1rem; }
+    .meta-row { display: flex; align-items: center; gap: 16px;
+                font-size: .85rem; color: #666; margin-bottom: 4px; }
+    #source   { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .vol-wrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .vol-bar  { width: 80px; height: 4px; background: #ddd; border-radius: 2px; }
+    .vol-fill { height: 100%; background: #888; border-radius: 2px; transition: width .4s; }
+    #vol-pct  { width: 2.5em; text-align: right; }
+
+    hr { border: none; border-top: 1px solid #eee; margin: 18px 0; }
+
+    /* ── System info ── */
+    #sysinfo { font-size: .8rem; color: #aaa;
+               display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 14px; }
+    .svc-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+               margin-right: 4px; vertical-align: middle; background: #ccc; }
+    .svc-dot.up   { background: #5cb85c; }
+    .svc-dot.down { background: #d9534f; }
+
+    /* ── Service log ── */
+    .section-label { font-size: .72rem; font-weight: 700; color: #bbb;
+                     letter-spacing: .08em; text-transform: uppercase; margin-bottom: 8px; }
+    .log-box { background: #f7f7f7; border-radius: 8px; padding: 10px 12px;
+               font-family: ui-monospace, monospace; font-size: .72rem;
+               overflow-x: auto; line-height: 1.6; }
+    .log-line { display: block; white-space: pre-wrap; word-break: break-all; color: #777; }
+    .log-line.is-fatal, .log-line.is-error { color: #c0392b; font-weight: 700; }
+    .log-line.is-warn  { color: #c47000; }
+    .log-line.is-start { color: #2e7d2e; }
+
+    /* ── History ── */
+    .h-row { display: flex; gap: 10px; align-items: baseline;
+             padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: .85rem; }
+    .h-row:last-child { border-bottom: none; }
+    .h-time   { color: #bbb; font-size: .75rem; white-space: nowrap; flex-shrink: 0; width: 5.5em; }
+    .h-title  { font-weight: 500; }
+    .h-artist { color: #888; }
+    .h-album  { color: #bbb; font-size: .78rem; font-style: italic; }
+  </style>
+</head>
+<body>
+
+  <!-- Health banner -->
+  <div id="health-banner" class="health ok">
+    <div class="health-info">
+      <div id="health-title" class="health-title">Checking...</div>
+      <div id="health-action" class="health-action"></div>
+    </div>
+    <button id="restart-btn" class="restart-btn" onclick="restartAirplay()">↺ Restart</button>
+  </div>
+
+  <!-- Now playing -->
+  <div id="status-line">Loading...</div>
+  <p id="track"></p>
+  <p id="artist"></p>
+  <p id="album"></p>
+  <div class="meta-row">
+    <span id="source"></span>
+    <div class="vol-wrap" id="vol-wrap" style="display:none">
+      <div class="vol-bar"><div class="vol-fill" id="vol-fill"></div></div>
+      <span id="vol-pct"></span>
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- System info -->
+  <div id="sysinfo">
+    <span id="uptime"></span>
+    <span id="cputemp"></span>
+    <span id="mem"></span>
+    <span id="load"></span>
+    <span><span class="svc-dot" id="svc-dot"></span><span id="svc-label">AirPlay</span></span>
+  </div>
+
+  <hr>
+
+  <!-- Service log -->
+  <div class="section-label">Service log</div>
+  <div class="log-box" id="log-box"><span class="log-line">Loading...</span></div>
+
+  <!-- Play history -->
+  <div id="history-section" style="display:none; margin-top:20px;">
+    <div class="section-label" style="margin-bottom:10px;">Recent plays</div>
+    <div id="history-list"></div>
+  </div>
+
+  <script>
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function fmtAge(secs) {
+      if (secs === null || secs === undefined || secs < 0) return '';
+      if (secs < 60)   return Math.round(secs) + 's';
+      if (secs < 3600) return Math.round(secs / 60) + 'm';
+      var h = Math.floor(secs / 3600);
+      var m = Math.round((secs % 3600) / 60);
+      return h + 'h ' + m + 'm';
+    }
+
+    function updateHealth(d) {
+      var banner   = document.getElementById('health-banner');
+      var title    = document.getElementById('health-title');
+      var action   = document.getElementById('health-action');
+      var btn      = document.getElementById('restart-btn');
+      var active   = d.svc_active;
+      var restarts = d.svc_restarts || 0;
+      var age      = d.svc_age_secs;
+
+      if (!active) {
+        banner.className   = 'health down';
+        title.textContent  = '● AirPlay service is DOWN';
+        action.textContent = 'Tap Restart below, then reconnect AirPlay from your device';
+        btn.textContent    = '↺ Restart AirPlay';
+      } else if (restarts > 0 && age !== null && age < 300) {
+        banner.className   = 'health warn';
+        title.textContent  = '● AirPlay crashed and restarted ' + fmtAge(age) + ' ago';
+        action.textContent = '→ Reconnect AirPlay from your device now';
+        btn.textContent    = '↺ Restart AirPlay';
+      } else {
+        banner.className = 'health ok';
+        var parts = ['● AirPlay ready'];
+        if (age !== null) parts.push(fmtAge(age));
+        if (restarts > 0) parts.push(restarts + ' auto-restart' + (restarts !== 1 ? 's' : ''));
+        title.textContent  = parts.join(' · ');
+        action.textContent = '';
+        if (!btn.disabled) btn.textContent = '↺ Restart';
+      }
+    }
+
+    function updateLogs(lines) {
+      var box = document.getElementById('log-box');
+      if (!lines || !lines.length) {
+        box.innerHTML = '<span class="log-line">No log entries.</span>';
+        return;
+      }
+      box.innerHTML = lines.map(function(raw) {
+        // Strip date + hostname, keep "HH:MM:SS process: message"
+        var m = raw.match(/\w{3}\s+\d+\s+(\d{2}:\d{2}:\d{2})\s+\S+\s+(.*)/);
+        var text = m ? m[1] + ' ' + m[2] : raw;
+        var lo = raw.toLowerCase();
+        var cls = 'log-line';
+        if (lo.includes('fatal'))                                   cls += ' is-fatal';
+        else if (lo.includes('error'))                              cls += ' is-error';
+        else if (lo.includes('warning'))                            cls += ' is-warn';
+        else if (lo.includes('started') || lo.includes('starting')) cls += ' is-start';
+        return '<span class="' + cls + '">' + esc(text) + '</span>';
+      }).join('');
+    }
+
+    function restartAirplay() {
+      var btn = document.getElementById('restart-btn');
+      btn.disabled = true;
+      btn.textContent = 'Restarting…';
+      fetch('/restart_airplay', {method: 'POST'})
+        .then(function() { setTimeout(function() { btn.disabled = false; }, 10000); })
+        .catch(function() { btn.disabled = false; });
+    }
+
+    function poll() {
+      fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
+        document.getElementById('status-line').textContent = d.playing ? 'Now playing' : 'Not playing';
+        document.getElementById('track').textContent  = d.title  || '';
+        document.getElementById('artist').textContent = d.artist || '';
+        document.getElementById('album').textContent  = d.album  || '';
+        document.getElementById('source').textContent = d.source ? '▶ ' + d.source : '';
+
+        var vw = document.getElementById('vol-wrap');
+        if (d.volume !== null && d.volume !== undefined) {
+          vw.style.display = 'flex';
+          document.getElementById('vol-fill').style.width = d.volume + '%';
+          document.getElementById('vol-pct').textContent  = d.volume + '%';
+        } else {
+          vw.style.display = 'none';
+        }
+
+        document.getElementById('uptime').textContent  = d.uptime  ? 'up ' + d.uptime          : '';
+        document.getElementById('cputemp').textContent = d.cputemp ? Math.round(d.cputemp*9/5+32)+'°F' : '';
+        document.getElementById('mem').textContent     = d.mem     ? 'mem ' + d.mem + '%'        : '';
+        document.getElementById('load').textContent    = d.load    ? 'load ' + d.load            : '';
+
+        var dot = document.getElementById('svc-dot');
+        dot.className = 'svc-dot ' + (d.svc_active ? 'up' : 'down');
+        document.getElementById('svc-label').textContent =
+          d.svc_active ? 'AirPlay ' + fmtAge(d.svc_age_secs) : 'AirPlay DOWN';
+
+        updateHealth(d);
+        if (d.logs) updateLogs(d.logs);
+
+        var hs = document.getElementById('history-section');
+        var hl = document.getElementById('history-list');
+        if (d.history && d.history.length) {
+          hs.style.display = 'block';
+          hl.innerHTML = d.history.map(function(e) {
+            return '<div class="h-row">' +
+              '<span class="h-time">'   + esc(e.played_at)         + '</span>' +
+              '<span class="h-title">'  + esc(e.title  || '–') + '</span>' +
+              '<span class="h-artist">' + (e.artist ? ' \xb7 ' + esc(e.artist) : '') + '</span>' +
+              '<span class="h-album">'  + (e.album  ? ' \xb7 ' + esc(e.album)  : '') + '</span>' +
+            '</div>';
+          }).join('');
+        } else {
+          hs.style.display = 'none';
+        }
+      }).catch(function() {});
+    }
+
+    poll();
+    setInterval(poll, 3000);
+  </script>
+</body>
+</html>"""
+
+
+def b64decode(text):
+    try:
+        return base64.b64decode(text).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def parse_volume(data):
+    # "airplay_vol,current_dBFS,min_dBFS,max_dBFS"  airplay_vol: -30..0, -144=muted
+    try:
+        airplay_vol = float(data.split(",")[0])
+        if airplay_vol <= -30:
+            return 0
+        return round((airplay_vol + 30) / 30 * 100)
     except Exception:
         return None
 
@@ -371,30 +509,40 @@ def index():
 
 @app.route("/status")
 def status():
+    svc = get_service_info()
     with lock:
-        return jsonify({**state,
-                        "uptime":           get_uptime(),
-                        "cputemp":          get_cputemp(),
-                        "mem":              get_mem_pct(),
-                        "load":             get_load(),
-                        "shairport_active": get_shairport_active(),
-                        "history":          list(history)})
+        return jsonify({
+            **state,
+            "uptime":           get_uptime(),
+            "cputemp":          get_cputemp(),
+            "mem":              get_mem_pct(),
+            "load":             get_load(),
+            "svc_active":       svc["active"],
+            "svc_restarts":     svc["restarts"],
+            "svc_age_secs":     svc["service_age_secs"],
+            "logs":             get_recent_logs(),
+            "history":          list(history),
+        })
 
 
-@app.route("/set_output", methods=["POST"])
-def set_output():
-    device = (request.json or {}).get("device")
-    if device not in OUTPUT_DEVICES:
-        return jsonify({"error": "invalid device"}), 400
-    result = subprocess.run(
-        ["sudo", "/usr/local/bin/set-airplay-output", OUTPUT_DEVICES[device]],
-        capture_output=True, timeout=15
-    )
-    if result.returncode != 0:
-        return jsonify({"error": "failed to switch output"}), 500
-    with lock:
-        state["output"] = device
-    return jsonify({"output": device})
+@app.route("/restart_airplay", methods=["POST"])
+def restart_airplay():
+    try:
+        subprocess.run(
+            ["sudo", "/usr/local/bin/restart-airplay"],
+            capture_output=True, timeout=20
+        )
+        with lock:
+            state["playing"] = False
+            state["title"]   = None
+            state["artist"]  = None
+            state["album"]   = None
+            state["source"]  = None
+            state["volume"]  = None
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1 @@
+aal ALL=(ALL) NOPASSWD: /usr/local/bin/restart-airplay

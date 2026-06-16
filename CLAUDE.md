@@ -1,107 +1,86 @@
 # pi-airplay
 
-Simple AirPlay 2 receiver on a Raspberry Pi, with a minimal web status page.
-No DSP, no LADSPA, no ALSA loopback. Just shairport-sync → headphone jack,
-and a small Flask page showing what's playing.
+AirPlay 2 receiver on a Raspberry Pi 3, with a minimal web status dashboard.
+Audio outputs via S/PDIF optical (TOSLINK) through a HiFiBerry Digi+ Standard HAT.
+No DSP, no LADSPA, no ALSA loopback.
 
----
-
-## Goal
-
-- AirPlay 2 audio plays through the Pi's 3.5mm jack → amplifier
-- A web page (port 8080 or similar) shows whether something is playing,
-  and ideally the track name / artist from shairport-sync's metadata pipe
-- VU meters would be nice eventually, but are not required to start
+See `README.md` for full setup/rebuild instructions and `signal-chain.md` for the
+digital signal path analysis.
 
 ---
 
 ## Pi connection
 
-- Hostname: `dynamo.local` (mDNS, works on the LAN)
-- SSH: `ssh dynamo.local` — keys are already in `~/.ssh/` on this Mac, no password needed
-- Username on the Pi: `aal`
-- OS: Raspberry Pi OS Bullseye (Debian 11), Pi 3
+- Hostname: `dynamo.local` (mDNS on LAN) or `dynamo` (Tailscale MagicDNS, works anywhere)
+- SSH: `ssh dynamo.local` or `ssh aal@192.168.1.103` — keys in `~/.ssh/`, no password
+- Username: `aal`
+- OS: Raspberry Pi OS Bullseye (Debian 11), 32-bit, Pi 3
 
 ---
 
-## What is currently running on the Pi — and what to clean up
+## Services
 
-The previous project (`dynamo-dsp`) installed these services. They should be
-**stopped and disabled** before starting fresh:
+| Service | What it does |
+|---------|-------------|
+| `shairport-sync` | AirPlay 2 receiver, built from source at `~/shairport-sync/` (development branch), `Restart=always` |
+| `nqptp` | AirPlay 2 precision timing daemon |
+| `pi-airplay` | Flask status dashboard on port 8080, `Restart=on-failure` |
 
-| Service | What it does | Action |
-|---------|-------------|--------|
-| `airplay-dsp` | ecasound TAP Dynamics DSP chain | **stop + disable** |
-| `dsp-ui` | Flask web UI on port 8080 (old project) | **stop + disable** |
-| `shairport-sync` | AirPlay 2 receiver | **keep, but reconfigure** |
-| `nqptp` | AirPlay 2 timing daemon | **keep as-is** |
+---
 
-### shairport-sync output fix (important)
+## Key file locations on the Pi
 
-During debugging, shairport-sync's output was changed to `hw:Loopback,1`
-(to feed the old ecasound chain). It must be changed back so it outputs
-directly to the headphone jack:
+| File | Purpose |
+|------|---------|
+| `/etc/shairport-sync.conf` | shairport-sync config (output device, name, metadata pipe) |
+| `/home/aal/pi-airplay/app.py` | Flask dashboard — source of truth is `app.py` in this repo |
+| `/home/aal/pi-airplay/history.json` | Persisted play history (last 25 tracks) |
+| `/tmp/shairport-sync-metadata` | Named pipe for now-playing metadata (XML) |
+| `/usr/local/bin/restart-airplay` | Helper: restarts nqptp then shairport-sync |
+| `/boot/config.txt` | HiFiBerry overlay (`dtoverlay=hifiberry-digi`, `dtparam=audio=off`) |
 
-```
-# /etc/shairport-sync.conf
-alsa = {
-  output_device = "hw:Headphones";
-  mixer_control_name = "";
-};
-```
+All system config files are also tracked in `pi-config/` in this repo.
 
-Then restart shairport-sync.
+---
 
-### snd-aloop (ALSA loopback kernel module)
+## Audio hardware
 
-The old project loaded `snd-aloop` at boot. It is no longer needed.
-It can be left loaded (harmless), or unloaded and removed from boot:
+- HiFiBerry Digi+ Standard HAT (WM8804 S/PDIF transceiver)
+- ALSA device: `hw:sndrpihifiberry` (card 1)
+- Output: TOSLINK fiber-optic S/PDIF
+- No hardware volume mixer — software volume only (shairport-sync handles it)
+- Observed ALSA output during playback: S24_LE, 48000 Hz (iOS sends at 48kHz)
+
+---
+
+## Network — important two-WiFi-interface quirks
+
+The Pi has two WiFi interfaces on the same LAN subnet, which requires two config fixes:
+
+**1. Avahi self-conflict** (`/etc/avahi/avahi-daemon.conf`)
+- `allow-interfaces=wlan1` pins mDNS to the USB dongle only
+- Without this, Avahi hears its own mDNS from the other interface and renames the host to `dynamo-2.local`, breaking AirPlay discovery
+- Symptom: AirPlay device disappears; `journalctl -u avahi-daemon` shows `dynamo-2.local`
+- Fix: `sudo systemctl restart avahi-daemon`
+
+**2. Asymmetric routing** (`/etc/dhcpcd.conf`)
+- `metric 100` on wlan1 makes it the preferred route (wlan0 is metric 303)
+- Without this, AirPlay connections arrive on wlan1 but reply packets go out wlan0 — the iPhone drops the session after ~10 seconds
+- Symptom: AirPlay connects, plays briefly, drops with iPhone error -15486; `shairport-sync -vvv` shows `feedback unexpected rate: 0.000000`
+- wlan0 stays active as automatic fallback if the dongle is removed
+
+---
+
+## Deploy command
 
 ```bash
-# optional cleanup
-sudo rmmod snd-aloop
-sudo rm -f /etc/modules-load.d/snd-aloop.conf
-sudo rm -f /etc/modprobe.d/snd-aloop.conf
+scp app.py dynamo.local:/home/aal/pi-airplay/app.py && ssh dynamo.local "sudo systemctl restart pi-airplay"
 ```
 
-### Old project files
+## shairport-sync rebuild
 
-The old project lives in `~/camilla/` on the Pi (not `~/dynamo-dsp/` —
-deployment was manual). Key files:
-
-- `~/camilla/airplay_dsp.sh` — ecasound launch script (not needed)
-- `~/dsp-ui/app.py` — old Flask app (not needed)
-- `/etc/systemd/system/airplay-dsp.service`
-- `/etc/systemd/system/dsp-ui.service`
-
----
-
-## shairport-sync metadata
-
-shairport-sync can write now-playing metadata (track, artist, album, play state)
-to a named pipe. Enable it in `/etc/shairport-sync.conf`:
-
-```
-metadata = {
-  enabled = "yes";
-  include_cover_art = "no";
-  pipe_name = "/tmp/shairport-sync-metadata";
-};
+```bash
+ssh dynamo.local "cd ~/shairport-sync && git pull && make -j3 && sudo make install && sudo systemctl restart shairport-sync"
 ```
 
-The pipe emits XML. A simple Python parser can extract track info from it.
-Reference: https://github.com/mikebrady/shairport-sync/blob/master/METADATA.md
-
----
-
-## Why the previous approach was abandoned
-
-The old project (`dynamo-dsp`) routed audio through an ALSA software loopback
-(snd-aloop) so that ecasound could apply a dynamic range expander (TAP Dynamics
-LADSPA plugin) and simultaneously tap the signal for browser VU meters.
-
-This unravelled because ecasound's multi-output chain routing is broken in
-practice: it only delivers audio to the *last* `-o:` argument in its command
-line, silently discarding the others. There is no clean fix without either
-CamillaDSP (a proper replacement for ecasound) or a more complex ALSA dsnoop
-configuration. The DSP feature wasn't essential, so the whole layer was dropped.
+No patch needed — the old `audio_alsa.c` crash fix was specific to the previous DSP setup and is no longer required.

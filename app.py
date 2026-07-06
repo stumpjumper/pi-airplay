@@ -7,7 +7,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify
 
 PIPE           = "/tmp/shairport-sync-metadata"
 HISTORY_FILE   = "/home/aal/pi-airplay/history.json"
@@ -138,7 +138,7 @@ def _load_history():
 history = _load_history()
 lock    = threading.Lock()
 
-HTML = """<!DOCTYPE html>
+HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -504,7 +504,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    return HTML
 
 
 @app.route("/status")
@@ -528,10 +528,13 @@ def status():
 @app.route("/restart_airplay", methods=["POST"])
 def restart_airplay():
     try:
-        subprocess.run(
+        r = subprocess.run(
             ["sudo", "/usr/local/bin/restart-airplay"],
-            capture_output=True, timeout=20
+            capture_output=True, text=True, timeout=20
         )
+        if r.returncode != 0:
+            err = r.stderr.strip() or f"restart-airplay exited {r.returncode}"
+            return jsonify({"error": err}), 500
         with lock:
             state["playing"] = False
             state["title"]   = None

@@ -12,7 +12,7 @@ digital signal path analysis.
 ## Pi connection
 
 - Hostname: `dynamo.local` (mDNS on LAN) or `dynamo` (Tailscale MagicDNS, works anywhere)
-- SSH: `ssh dynamo.local` or `ssh aal@192.168.1.103` — keys in `~/.ssh/`, no password
+- SSH: `ssh dynamo.local` (preferred) or `ssh aal@192.168.1.104` (wlan1, static) — keys in `~/.ssh/`, no password. Off-network: `ssh dynamo.taild6cb04.ts.net` (Tailscale).
 - Username: `aal`
 - OS: Raspberry Pi OS Bullseye (Debian 11), 32-bit, Pi 3
 

@@ -63,7 +63,18 @@ dtoverlay=hifiberry-digi
 
 Reboot after writing this file.
 
-### 3. nqptp
+### 3. Build dependencies
+
+Needed by both nqptp and shairport-sync:
+
+```bash
+sudo apt install --no-install-recommends build-essential git autoconf automake libtool \
+  libpopt-dev libconfig-dev libasound2-dev avahi-daemon libavahi-client-dev libssl-dev \
+  libsoxr-dev libplist-dev libsodium-dev libavutil-dev libavcodec-dev libavformat-dev \
+  uuid-dev libgcrypt-dev xxd
+```
+
+### 4. nqptp
 
 Required for AirPlay 2. Build from source:
 
@@ -78,18 +89,9 @@ sudo systemctl enable nqptp
 sudo systemctl start nqptp
 ```
 
-### 4. shairport-sync
+### 5. shairport-sync
 
-Build from source (development branch). Install dependencies first:
-
-```bash
-sudo apt install --no-install-recommends build-essential git autoconf automake libtool \
-  libpopt-dev libconfig-dev libasound2-dev avahi-daemon libavahi-client-dev libssl-dev \
-  libsoxr-dev libplist-dev libsodium-dev libavutil-dev libavcodec-dev libavformat-dev \
-  uuid-dev libgcrypt-dev xxd
-```
-
-Build:
+Build from source (development branch):
 
 ```bash
 git clone https://github.com/mikebrady/shairport-sync.git
@@ -106,7 +108,7 @@ sudo systemctl start shairport-sync
 
 Deploy `pi-config/etc/shairport-sync.conf` to `/etc/shairport-sync.conf`, then restart shairport-sync.
 
-### 5. Network config (important — two WiFi interfaces)
+### 6. Network config (important — two WiFi interfaces)
 
 The Pi has two WiFi interfaces on the same subnet, which causes mDNS self-conflicts and AirPlay routing failures without these fixes.
 
@@ -124,7 +126,7 @@ sudo systemctl restart dhcpcd
 
 See `signal-chain.md` and the Claude memory files for the full explanation of why these are needed.
 
-### 6. Flask dashboard
+### 7. Flask dashboard
 
 Install Flask:
 
@@ -142,7 +144,7 @@ sudo systemctl enable pi-airplay
 sudo systemctl start pi-airplay
 ```
 
-### 7. restart-airplay helper script
+### 8. restart-airplay helper script
 
 ```bash
 sudo cp pi-config/usr-local-bin/restart-airplay /usr/local/bin/restart-airplay
@@ -169,8 +171,9 @@ Visit `http://dynamo.local:8080` on the LAN. Shows:
 
 - `dynamo.local` — mDNS via Avahi (LAN only)
 - `dynamo` — Tailscale MagicDNS (works anywhere on the tailnet)
-- wlan0 (internal, 192.168.1.103) stays active as fallback if dongle is removed
+- wlan0 (internal, 192.168.1.103) stays active as fallback if dongle is removed — SSH only; Avahi/AirPlay are pinned to wlan1
 - wlan1 (USB dongle, 192.168.1.104) is the primary interface (better signal, lower metric)
+- Both IPs are static via DHCP reservations on the router (dhcpcd itself uses plain DHCP)
 
 ## Signal chain
 

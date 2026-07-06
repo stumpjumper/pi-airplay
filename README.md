@@ -159,7 +159,7 @@ sudo chmod 440 /etc/sudoers.d/pi-airplay-restart
 
 Visit `http://dynamo.local:8080` on the LAN. Shows:
 
-- Now playing: track, artist, album, source device, volume
+- Now playing: track, artist, album, cover art, source device, volume
 - Health banner: green/amber/red based on service state
 - System info: uptime, CPU temp, memory, load
 - Play history: last 25 tracks

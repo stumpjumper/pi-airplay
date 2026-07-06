@@ -8,7 +8,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime
-from flask import Flask, jsonify
+from flask import Flask, Response, jsonify
 
 PIPE           = "/tmp/shairport-sync-metadata"
 HISTORY_FILE   = "/home/aal/pi-airplay/history.json"
@@ -128,6 +128,9 @@ def get_recent_logs():
 state   = {"title": None, "artist": None, "album": None,
            "playing": False, "source": None, "volume": None}
 staging: dict = {}
+# Latest cover art from the sender (AirPlay 2 copl updates). id bumps on every
+# change so the frontend can cache-bust.
+artwork = {"bytes": None, "id": 0}
 
 # Diagnostic trace of recent metadata pipe items, served at /debug
 trace: deque = deque(maxlen=100)
@@ -193,6 +196,11 @@ HTML = r"""<!DOCTYPE html>
     /* ── Now playing ── */
     #status-line { font-size: .78rem; font-weight: 700; color: #aaa;
                    letter-spacing: .08em; text-transform: uppercase; margin-bottom: 10px; }
+    #np-row  { display: flex; gap: 14px; align-items: flex-start; }
+    #np-text { flex: 1; min-width: 0; }
+    #artwork { display: none; width: 88px; height: 88px; border-radius: 8px;
+               object-fit: cover; flex-shrink: 0; background: #f0f0f0;
+               box-shadow: 0 1px 4px rgba(0,0,0,.18); }
     #track  { font-size: 1.5rem; font-weight: bold; margin-bottom: 4px; min-height: 1.8rem; }
     #artist { font-size: 1rem; color: #444; margin-bottom: 2px; min-height: 1.2rem; }
     #album  { font-size: .9rem; color: #888; font-style: italic;
@@ -249,14 +257,19 @@ HTML = r"""<!DOCTYPE html>
 
   <!-- Now playing -->
   <div id="status-line">Loading...</div>
-  <p id="track"></p>
-  <p id="artist"></p>
-  <p id="album"></p>
-  <div class="meta-row">
-    <span id="source"></span>
-    <div class="vol-wrap" id="vol-wrap" style="display:none">
-      <div class="vol-bar"><div class="vol-fill" id="vol-fill"></div></div>
-      <span id="vol-pct"></span>
+  <div id="np-row">
+    <img id="artwork" alt="">
+    <div id="np-text">
+      <p id="track"></p>
+      <p id="artist"></p>
+      <p id="album"></p>
+      <div class="meta-row">
+        <span id="source"></span>
+        <div class="vol-wrap" id="vol-wrap" style="display:none">
+          <div class="vol-bar"><div class="vol-fill" id="vol-fill"></div></div>
+          <span id="vol-pct"></span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -364,6 +377,18 @@ HTML = r"""<!DOCTYPE html>
         document.getElementById('album').textContent  = d.album  || '';
         document.getElementById('source').textContent = d.source ? '▶ ' + d.source : '';
 
+        var art = document.getElementById('artwork');
+        if (d.artwork_id) {
+          if (art.dataset.v !== String(d.artwork_id)) {
+            art.src = '/artwork?v=' + d.artwork_id;
+            art.dataset.v = String(d.artwork_id);
+          }
+          art.style.display = 'block';
+        } else {
+          art.style.display = 'none';
+          art.dataset.v = '';
+        }
+
         var vw = document.getElementById('vol-wrap');
         if (d.volume !== null && d.volume !== undefined) {
           vw.style.display = 'flex';
@@ -423,11 +448,17 @@ def parse_mr_now_playing(raw):
         return None
     params = p.get("params")
     inner = params.get("params") if isinstance(params, dict) else None
-    if not isinstance(inner, dict) or "kMRMediaRemoteNowPlayingInfoTitle" not in inner:
+    if not isinstance(inner, dict):
         return None
-    return (inner.get("kMRMediaRemoteNowPlayingInfoTitle"),
-            inner.get("kMRMediaRemoteNowPlayingInfoArtist"),
-            inner.get("kMRMediaRemoteNowPlayingInfoAlbum"))
+    out = {}
+    if "kMRMediaRemoteNowPlayingInfoTitle" in inner:
+        out["track"] = (inner.get("kMRMediaRemoteNowPlayingInfoTitle"),
+                        inner.get("kMRMediaRemoteNowPlayingInfoArtist"),
+                        inner.get("kMRMediaRemoteNowPlayingInfoAlbum"))
+    art = inner.get("kMRMediaRemoteNowPlayingInfoArtworkData")
+    if isinstance(art, bytes) and art:
+        out["artwork"] = art
+    return out or None
 
 
 def parse_volume(data):
@@ -494,7 +525,17 @@ def handle_item(xml_str):
     with lock:
         if type_ == SSNC and code == COPL:
             if copl_info:
-                _commit_track(*copl_info)
+                if "track" in copl_info:
+                    changed = copl_info["track"][:2] != (state["title"], state["artist"])
+                    _commit_track(*copl_info["track"])
+                    # a new track with no bundled art keeps the old cover from
+                    # showing against the wrong song
+                    if changed and "artwork" not in copl_info:
+                        artwork["bytes"] = None
+                        artwork["id"] += 1
+                if "artwork" in copl_info:
+                    artwork["bytes"] = copl_info["artwork"]
+                    artwork["id"] += 1
         elif type_ == SSNC and code == MDST:
             staging.clear()
         elif type_ == SSNC and code == MDEN:
@@ -521,6 +562,9 @@ def handle_item(xml_str):
             state["source"]  = None
             state["volume"]  = None
             staging.clear()
+            if artwork["bytes"]:
+                artwork["bytes"] = None
+                artwork["id"] += 1
         elif type_ == SSNC and code == PAUS:
             state["playing"] = False
 
@@ -569,7 +613,19 @@ def status():
             "svc_age_secs":     svc["service_age_secs"],
             "logs":             get_recent_logs(),
             "history":          list(history),
+            "artwork_id":       artwork["id"] if artwork["bytes"] else None,
         })
+
+
+@app.route("/artwork")
+def artwork_route():
+    with lock:
+        buf = artwork["bytes"]
+    if not buf:
+        return "", 404
+    mime = "image/png" if buf.startswith(b"\x89PNG") else "image/jpeg"
+    return Response(buf, mimetype=mime,
+                    headers={"Cache-Control": "max-age=31536000, immutable"})
 
 
 @app.route("/debug")
@@ -594,6 +650,9 @@ def restart_airplay():
             state["album"]   = None
             state["source"]  = None
             state["volume"]  = None
+            if artwork["bytes"]:
+                artwork["bytes"] = None
+                artwork["id"] += 1
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

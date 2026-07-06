@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import json
+import plistlib
 import subprocess
 import threading
 import time
@@ -29,6 +30,7 @@ MDST  = _h("mdst")
 MDEN  = _h("mden")
 SNAM  = _h("snam")
 PVOL  = _h("pvol")
+COPL  = _h("copl")
 
 
 
@@ -126,6 +128,15 @@ def get_recent_logs():
 state   = {"title": None, "artist": None, "album": None,
            "playing": False, "source": None, "volume": None}
 staging: dict = {}
+
+# Diagnostic trace of recent metadata pipe items, served at /debug
+trace: deque = deque(maxlen=100)
+
+def _hex2ascii(h):
+    try:
+        return bytes.fromhex(h).decode("ascii")
+    except Exception:
+        return h
 
 
 def _load_history():
@@ -400,11 +411,23 @@ HTML = r"""<!DOCTYPE html>
 </html>"""
 
 
-def b64decode(text):
+def parse_mr_now_playing(raw):
+    # AirPlay 2 senders deliver track info as MediaRemote command plists
+    # (ssnc/copl) instead of classic core metadata items. Track info sits at
+    # plist["params"]["params"] under kMRMediaRemoteNowPlayingInfo* keys.
     try:
-        return base64.b64decode(text).decode("utf-8", errors="replace")
+        p = plistlib.loads(raw)
     except Exception:
         return None
+    if p.get("type") != "updateMRNowPlayingInfo":
+        return None
+    params = p.get("params")
+    inner = params.get("params") if isinstance(params, dict) else None
+    if not isinstance(inner, dict) or "kMRMediaRemoteNowPlayingInfoTitle" not in inner:
+        return None
+    return (inner.get("kMRMediaRemoteNowPlayingInfoTitle"),
+            inner.get("kMRMediaRemoteNowPlayingInfoArtist"),
+            inner.get("kMRMediaRemoteNowPlayingInfoAlbum"))
 
 
 def parse_volume(data):
@@ -418,6 +441,28 @@ def parse_volume(data):
         return None
 
 
+def _commit_track(title, artist, album):
+    # Caller must hold lock. Updates now-playing state and appends to history.
+    state["title"]   = title
+    state["artist"]  = artist
+    state["album"]   = album
+    state["playing"] = True
+    if title or artist:
+        last = history[0] if history else None
+        if not last or last["title"] != title or last["artist"] != artist:
+            history.appendleft({
+                "title":     title,
+                "artist":    artist,
+                "album":     album,
+                "played_at": datetime.now().strftime("%-m/%-d %-I:%M %p"),
+            })
+            try:
+                with open(HISTORY_FILE, "w") as f:
+                    json.dump(list(history), f)
+            except Exception:
+                pass
+
+
 def handle_item(xml_str):
     try:
         item = ET.fromstring(xml_str)
@@ -426,34 +471,36 @@ def handle_item(xml_str):
     type_ = item.findtext("type") or ""
     code  = item.findtext("code") or ""
     data_el = item.find("data")
-    data = b64decode(data_el.text) if data_el is not None and data_el.text else None
+    raw  = None
+    data = None
+    if data_el is not None and data_el.text:
+        try:
+            raw  = base64.b64decode(data_el.text)
+            data = raw.decode("utf-8", errors="replace")
+        except Exception:
+            pass
+
+    trace.append({
+        "at":   datetime.now().strftime("%H:%M:%S"),
+        "type": _hex2ascii(type_),
+        "code": _hex2ascii(code),
+        "data": data[:60] if data else None,
+    })
+
+    copl_info = None
+    if type_ == SSNC and code == COPL and raw:
+        copl_info = parse_mr_now_playing(raw)
 
     with lock:
-        if type_ == SSNC and code == MDST:
+        if type_ == SSNC and code == COPL:
+            if copl_info:
+                _commit_track(*copl_info)
+        elif type_ == SSNC and code == MDST:
             staging.clear()
         elif type_ == SSNC and code == MDEN:
-            title  = staging.get("title")
-            artist = staging.get("artist")
-            album  = staging.get("album")
-            state["title"]   = title
-            state["artist"]  = artist
-            state["album"]   = album
-            state["playing"] = True
+            _commit_track(staging.get("title"), staging.get("artist"),
+                          staging.get("album"))
             staging.clear()
-            if title or artist:
-                last = history[0] if history else None
-                if not last or last["title"] != title or last["artist"] != artist:
-                    history.appendleft({
-                        "title":     title,
-                        "artist":    artist,
-                        "album":     album,
-                        "played_at": datetime.now().strftime("%-m/%-d %-I:%M %p"),
-                    })
-                    try:
-                        with open(HISTORY_FILE, "w") as f:
-                            json.dump(list(history), f)
-                    except Exception:
-                        pass
         elif code == MINM:
             staging["title"] = data
         elif code == ASAR:
@@ -523,6 +570,11 @@ def status():
             "logs":             get_recent_logs(),
             "history":          list(history),
         })
+
+
+@app.route("/debug")
+def debug():
+    return jsonify(list(trace))
 
 
 @app.route("/restart_airplay", methods=["POST"])

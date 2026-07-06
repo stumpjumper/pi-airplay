@@ -219,7 +219,7 @@ HTML = r"""<!DOCTYPE html>
     .h-row { display: flex; gap: 10px; align-items: baseline;
              padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: .85rem; }
     .h-row:last-child { border-bottom: none; }
-    .h-time   { color: #bbb; font-size: .75rem; white-space: nowrap; flex-shrink: 0; width: 5.5em; }
+    .h-time   { color: #bbb; font-size: .75rem; white-space: nowrap; flex-shrink: 0; width: 8em; }
     .h-title  { font-weight: 500; }
     .h-artist { color: #888; }
     .h-album  { color: #bbb; font-size: .78rem; font-style: italic; }
@@ -447,7 +447,7 @@ def handle_item(xml_str):
                         "title":     title,
                         "artist":    artist,
                         "album":     album,
-                        "played_at": datetime.now().strftime("%-I:%M %p"),
+                        "played_at": datetime.now().strftime("%-m/%-d %-I:%M %p"),
                     })
                     try:
                         with open(HISTORY_FILE, "w") as f:

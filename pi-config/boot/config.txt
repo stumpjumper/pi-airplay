@@ -79,5 +79,3 @@ otg_mode=1
 arm_boost=1
 
 [all]
-#dtoverlay=w1-gpio
-dtoverlay=w1-gpio,gpiopin=17

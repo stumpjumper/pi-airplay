@@ -178,3 +178,19 @@ Visit `http://dynamo.local:8080` on the LAN. Shows:
 ## Signal chain
 
 See `signal-chain.md` for the full AirPlay 2 → S/PDIF digital signal path, including observed format (48kHz/24-bit S24_LE at the ALSA layer) and signal quality analysis.
+
+## Known limitations (reviewed 2026-07, deliberately left as-is)
+
+- **wlan1 dongle is a single point of failure for AirPlay.** Avahi is pinned to
+  wlan1, so if the dongle dies, wlan0 keeps SSH working but mDNS/AirPlay stop.
+  Auto-failover isn't worth the complexity for a home box.
+- **`/restart_airplay` is unauthenticated** (and CSRF-able from the LAN). Worst
+  case is a restarted AirPlay service; not worth adding auth to a single-user
+  dashboard. Revisit if ever exposed beyond the LAN/tailnet.
+- **Metadata edge cases:** a sparse metadata bundle can blank the current track,
+  and a metadata refresh during pause briefly shows "Now playing". Both are
+  cosmetic and self-correct; fixing them means second-guessing shairport-sync's
+  event ordering.
+- **`/status` shells out to `systemctl show` on every 3s poll** (journalctl is
+  cached, this isn't) and the dashboard runs on the Flask dev server. Fine at
+  one-viewer scale.

@@ -69,6 +69,12 @@ The Pi has two WiFi interfaces on the same LAN subnet, which requires two config
 - Symptom: AirPlay connects, plays briefly, drops with iPhone error -15486; `shairport-sync -vvv` shows `feedback unexpected rate: 0.000000`
 - wlan0 stays active as automatic fallback if the dongle is removed
 
+**3. wlan1 is on a mesh network ("Armario") with multiple nodes of very different signal strength**
+- wlan1 can silently roam to a weak node and stay there for days, causing intermittent stalls/drops that look like a phone or app problem
+- The dashboard shows the current node (by room name) and signal strength in the system-info row — check it first if playback gets flaky
+- Force reassociation to the strongest node: `wpa_cli -i wlan1 disconnect && wpa_cli -i wlan1 reconnect` (no sudo needed, `aal` is in the `netdev` group)
+- Known nodes are labeled in `WIFI_NODE_NAMES` at the top of `app.py`
+
 ---
 
 ## Deploy command

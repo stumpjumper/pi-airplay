@@ -15,13 +15,13 @@ HISTORY_FILE   = "/home/aal/pi-airplay/history.json"
 WIFI_IFACE     = "wlan1"
 
 # Friendly names for known mesh access points (SSID "Armario"), keyed by
-# BSSID. Fill these in as you identify which physical node is which; the
-# dashboard falls back to the raw BSSID for anything not listed.
-# Seen during the 2026-07-27 investigation:
-#   40:ae:30:dd:8c:6a  ~ -44 dBm (strong / close)
-#   40:ae:30:dd:8c:fe  ~ -56 dBm (medium)
-#   40:ae:30:dd:8b:c2  ~ -64 dBm (weak / far) -- wlan1 drifted here for 3 days
+# BSSID. Dashboard falls back to the raw BSSID for anything not listed.
+# Node identity confirmed via ARP: each node's WiFi BSSID is its base MAC + 2
+# (e.g. Breakfast Nook's LAN MAC 40:ae:30:dd:8c:fc -> WiFi BSSID ...8c:fe).
 WIFI_NODE_NAMES = {
+    "40:ae:30:dd:8b:c2": "Garage",           # ~ -64 dBm, weak/far
+    "40:ae:30:dd:8c:fe": "Breakfast Nook",   # ~ -56 dBm, medium
+    "40:ae:30:dd:8c:6a": "Ballroom",         # ~ -44 dBm, strong/close
 }
 
 def _h(s):

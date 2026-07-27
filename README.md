@@ -161,7 +161,7 @@ Visit `http://dynamo.local:8080` on the LAN. Shows:
 
 - Now playing: track, artist, album, cover art, source device, volume
 - Health banner: green/amber/red based on service state
-- System info: uptime, CPU temp, memory, load
+- System info: uptime, CPU temp, memory, load, current mesh WiFi node + signal strength
 - Play history: last 25 tracks
 - Restart AirPlay button
 

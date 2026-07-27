@@ -12,6 +12,17 @@ from flask import Flask, Response, jsonify
 
 PIPE           = "/tmp/shairport-sync-metadata"
 HISTORY_FILE   = "/home/aal/pi-airplay/history.json"
+WIFI_IFACE     = "wlan1"
+
+# Friendly names for known mesh access points (SSID "Armario"), keyed by
+# BSSID. Fill these in as you identify which physical node is which; the
+# dashboard falls back to the raw BSSID for anything not listed.
+# Seen during the 2026-07-27 investigation:
+#   40:ae:30:dd:8c:6a  ~ -44 dBm (strong / close)
+#   40:ae:30:dd:8c:fe  ~ -56 dBm (medium)
+#   40:ae:30:dd:8b:c2  ~ -64 dBm (weak / far) -- wlan1 drifted here for 3 days
+WIFI_NODE_NAMES = {
+}
 
 def _h(s):
     return s.encode().hex()
@@ -105,6 +116,44 @@ def get_service_info():
         return {"active": active, "restarts": restarts, "service_age_secs": service_age_secs}
     except Exception:
         return {"active": False, "restarts": 0, "service_age_secs": None}
+
+
+_wifi_last_bssid = None
+
+def get_wifi_info():
+    # wpa_cli talks to the wpa_supplicant control socket, which is group
+    # "netdev" -- aal is a member, so this works without sudo.
+    global _wifi_last_bssid
+    try:
+        r = subprocess.run(
+            ["/usr/sbin/wpa_cli", "-i", WIFI_IFACE, "status"],
+            capture_output=True, text=True, timeout=3
+        )
+        props = {}
+        for line in r.stdout.splitlines():
+            k, _, v = line.partition("=")
+            props[k.strip()] = v.strip()
+        bssid = props.get("bssid")
+        if not bssid:
+            return None
+
+        # Columns after "wlan1:" are: status link level noise nwid crypt
+        # frag retry misc beacon -- level (index 2) is the signal in dBm.
+        signal_dbm = None
+        with open("/proc/net/wireless") as f:
+            for line in f:
+                if line.strip().startswith(WIFI_IFACE + ":"):
+                    signal_dbm = float(line.split(":")[1].split()[2].rstrip("."))
+                    break
+
+        label = WIFI_NODE_NAMES.get(bssid, bssid)
+        if bssid != _wifi_last_bssid:
+            print(f"wifi: wlan1 connected to {label} ({signal_dbm} dBm)", flush=True)
+            _wifi_last_bssid = bssid
+
+        return {"bssid": bssid, "label": label, "signal_dbm": signal_dbm}
+    except Exception:
+        return None
 
 
 _log_cache: dict = {"lines": [], "ts": 0.0}
@@ -222,6 +271,9 @@ HTML = r"""<!DOCTYPE html>
                margin-right: 4px; vertical-align: middle; background: #ccc; }
     .svc-dot.up   { background: #5cb85c; }
     .svc-dot.down { background: #d9534f; }
+    .svc-dot.good { background: #5cb85c; }
+    .svc-dot.fair { background: #f0c030; }
+    .svc-dot.poor { background: #d9534f; }
 
     /* ── Service log ── */
     .section-label { font-size: .72rem; font-weight: 700; color: #bbb;
@@ -281,6 +333,7 @@ HTML = r"""<!DOCTYPE html>
     <span id="cputemp"></span>
     <span id="mem"></span>
     <span id="load"></span>
+    <span id="wifi-row" style="display:none"><span class="svc-dot" id="wifi-dot"></span><span id="wifi-label"></span></span>
     <span><span class="svc-dot" id="svc-dot"></span><span id="svc-label">AirPlay</span></span>
   </div>
 
@@ -407,6 +460,16 @@ HTML = r"""<!DOCTYPE html>
         dot.className = 'svc-dot ' + (d.svc_active ? 'up' : 'down');
         document.getElementById('svc-label').textContent =
           d.svc_active ? 'AirPlay ' + fmtAge(d.svc_age_secs) : 'AirPlay DOWN';
+        var wifiRow = document.getElementById('wifi-row');
+        if (d.wifi && d.wifi.signal_dbm !== null && d.wifi.signal_dbm !== undefined) {
+          var dbm = d.wifi.signal_dbm;
+          var q = dbm >= -60 ? 'good' : (dbm >= -72 ? 'fair' : 'poor');
+          document.getElementById('wifi-dot').className = 'svc-dot ' + q;
+          document.getElementById('wifi-label').textContent = d.wifi.label + ' ' + dbm + ' dBm';
+          wifiRow.style.display = 'inline';
+        } else {
+          wifiRow.style.display = 'none';
+        }
 
         updateHealth(d);
         if (d.logs) updateLogs(d.logs);
@@ -614,6 +677,7 @@ def status():
             "logs":             get_recent_logs(),
             "history":          list(history),
             "artwork_id":       artwork["id"] if artwork["bytes"] else None,
+            "wifi":             get_wifi_info(),
         })
 
 
